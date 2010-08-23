@@ -10,15 +10,10 @@
 
 #define MAXTHREADS 32
 
-typedef struct ThreadQueue_data_ {
-   int (*function)(void *);
-   void *data;
-} ThreadQueue_data_;
-typedef ThreadQueue_data_ *ThreadQueue_data;
 
 typedef struct Node_ *Node;
 typedef struct Node_ {
-   ThreadQueue_data *data;
+   void *data;
    Node next;
 } Node_;
 
@@ -29,6 +24,12 @@ typedef struct ThreadQueue_ {
    SDL_mutex *mutex;
 } ThreadQueue_;
 typedef ThreadQueue_ *ThreadQueue;
+
+typedef struct ThreadQueue_data_ {
+   int (*function)(void *);
+   void *data;
+} ThreadQueue_data_;
+typedef ThreadQueue_data_ *ThreadQueue_data;
 
 typedef struct ThreadData_ {
    int (*function)(void *);
