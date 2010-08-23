@@ -3,7 +3,7 @@
 #  define THREADPOOL_H
 
 int threadpool_init();
-int threadpool_newJob( int (*function)(void *),
+int threadpool_newJob( int (*function)(void *), void *data );
 
 
 #endif
