@@ -1,14 +1,26 @@
 /*
- * Hello, world!
+ * threadpool.c
+ *
+ * Reynir Reynisson
  * 
  * The queue stuff is mostly stolen from queue.c
+ * The queue is not intended for general use. Deadlocks might occur if used
+ * in a 'wrong' way.
  */
 
 #include "SDL.h"
 #include "SDL_thread.h"
+#include "log.h" /* For debugging in naev */
 #include <stdlib.h>
 
-#define MAXTHREADS 32
+#define THREADPOOL_TIMEOUT (30 * 1000)
+
+
+#if SDL_VERSION_ATLEAST(1,3,0)
+const int MAXTHREADS = SDL_GetCPUCount(); // TODO: I have to read the doc about this...
+#else
+const int MAXTHREADS = 8;
+#endif
 
 
 typedef struct Node_ *Node;
@@ -35,7 +47,8 @@ typedef struct ThreadData_ {
    int (*function)(void *);
    void *data;
    SDL_sem *semaphore;
-   ThreadQueue queue;
+   ThreadQueue idle;
+   ThreadQueue stopped;
 } ThreadData_;
 
 
@@ -47,6 +60,7 @@ ThreadQueue tq_create()
 
    q->first = NULL;
    q->last = NULL;
+   q->mutex = SDL_CreateMutex();
    q->semaphore = SDL_CreateSemaphore( 0 );
 
    return q;
@@ -70,8 +84,6 @@ void tq_enqueue( ThreadQueue q, void *data )
 
    SDL_SemPost(q->semaphore);
    SDL_mutexV(q->mutex); // Unlock
-
-   return; // wow, redundant!
 }
 
 void* tq_dequeue( ThreadQueue q )
@@ -100,6 +112,7 @@ void* tq_dequeue( ThreadQueue q )
 void tq_destroy( ThreadQueue q )
 {
    SDL_DestroySemaphore(q->semaphore);
+   SDL_DestroyMutex(q->mutex);
 
    while(q->first != NULL) {
       tq_dequeue(q);
@@ -108,7 +121,7 @@ void tq_destroy( ThreadQueue q )
 }
 
 /* Eh, threadsafe? nah */
-int q_isEmpty( ThreadQueue q )
+int tq_isEmpty( ThreadQueue q )
 {
    if (q->first == NULL)
       return 1;
@@ -122,8 +135,10 @@ int q_isEmpty( ThreadQueue q )
 int threadpool_newJob(int (*function)(void *), void *data)
 {
    ThreadQueue_data node;
-   if (queue == NULL)
-      return -2; // No threadpool has been made!
+   if (queue == NULL) {
+      WARN("threadpool.c: Threadpool has not been initialized yet!");
+      return -2;
+   }
    
    node = malloc( sizeof(ThreadQueue_data_) );
    node->data = data;
@@ -141,54 +156,65 @@ int threadpool_worker( void *data )
    work = (ThreadData_ *) data;
 
    while (1) {
-      SDL_SemWait( work->semaphore );
-      // Do work
+      /* Break if timeout or signal to stop */
+      if (SDL_SemWaitTimeout( work->semaphore, THREADPOOL_TIMEOUT ) != 0)
+         break;
+
       (*work->function)( work->data );
       
-      tq_enqueue( work->queue, work );
+      tq_enqueue( work->idle, work );
    }
+   tq_enqueue( work->stopped, work );
+
+   return 0;
 }
 
 int threadpool_handler( void *data )
 {
-   SDL_Thread **thread_stack; // Stack of workers, in case magic happens.
+   int i;
    ThreadData_ *threadargs, *threadarg;
-   int thread_nstack;
-   ThreadQueue idle; // Queue for idle workers.
+   ThreadQueue idle, stopped; /* Queues for idle workers and stopped workers */
    ThreadQueue_data node;
 
    threadargs = malloc( sizeof(ThreadData_)*MAXTHREADS );
-   thread_stack = malloc( sizeof(SDL_Thread *)*MAXTHREADS ); // Will allocate MAXTHREADS for now.
-   thread_nstack = -1;
 
    idle = tq_create();
+   stopped = tq_create();
+
+   /* Initialize threadargs */
+   for (i=0; i<MAXTHREADS; i++) {
+      threadargs[i].function = NULL;
+      threadargs[i].data = NULL;
+      threadargs[i].semaphore = SDL_CreateSemaphore( 0 );
+      threadargs[i].idle = idle;
+      threadargs[i].stopped = stopped;
+
+      tq_enqueue(stopped, &threadargs[i]);
+   }
 
    while (1) {
-      SDL_SemWait( queue->semaphore ); // Wait for new job(s) in queue
-      
+      SDL_SemWait( queue->semaphore ); /* Wait for new job(s) in queue */
       node = tq_dequeue( queue );
 
-      if( thread_nstack < MAXTHREADS-1 ) {
-         int res = 123; // Eh
-         res = SDL_SemTryWait( idle->semaphore ); // Is there already an idle thread?
-         if(res==0) {
-            // We got an idle worker in idle
-            threadarg = tq_dequeue( idle );
-            threadarg->function = node->function;
-            threadarg->data = node->data;
-            SDL_SemPost( threadarg->semaphore );
-         } else {
-            // Make new thread and give it work
-            thread_nstack++;
-            threadargs[thread_nstack].function = node ->function;
-            threadargs[thread_nstack].data = node->data;
-            threadargs[thread_nstack].semaphore = SDL_CreateSemaphore( 1 );
-            threadargs[thread_nstack].queue = idle;
+      if( SDL_SemTryWait(idle->semaphore) == 0) {
+         /* Idle thread available */
+         threadarg = tq_dequeue( idle );
+         threadarg->function = node->function;
+         threadarg->data = node->data;
+         SDL_SemPost( threadarg->semaphore );
 
-            thread_stack[thread_nstack] = SDL_CreateThread( threadpool_worker, &threadargs[thread_nstack] );
-         }
+      } else if( SDL_SemTryWait(stopped->semaphore) == 0) {
+         /* Make new thread */
+         threadarg = tq_dequeue(stopped);
+         threadarg->function = node ->function;
+         threadarg->data = node->data;
+         SDL_SemPost( threadarg->semaphore );
+
+         SDL_CreateThread( threadpool_worker, threadarg );
+
       } else {
-         SDL_SemWait( idle->semaphore ); // Wait for idle thread
+         /* Wait for idle thread */
+         SDL_SemWait(idle->semaphore);
          threadarg = tq_dequeue( idle );
          threadarg->function = node->function;
          threadarg->data = node->data;
@@ -199,8 +225,10 @@ int threadpool_handler( void *data )
 
 int threadpool_init()
 {
-   if (queue != NULL)
+   if (queue != NULL) {
+      WARN("Threadpool has already been initialized!");
       return -1;
+   }
 
    queue = tq_create();
 
@@ -208,3 +236,10 @@ int threadpool_init()
 
    return 0;
 }
+
+/* Notes
+ *
+ * The algorithm/strategy for killing idle workers should be moved into the
+ * threadhandler and it should also be improved (the current strategy is
+ * probably not very good).
+ */
