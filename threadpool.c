@@ -17,7 +17,7 @@
 
 
 #if SDL_VERSION_ATLEAST(1,3,0)
-const int MAXTHREADS = SDL_GetCPUCount(); // TODO: I have to read the doc about this...
+const int MAXTHREADS = SDL_GetCPUCount(); /* TODO: I have to read the doc about this... */
 #else
 const int MAXTHREADS = 8;
 #endif
@@ -71,7 +71,8 @@ void tq_enqueue( ThreadQueue q, void *data )
 {
    Node n;
 
-   SDL_mutexP(q->mutex); // Lock
+   /* Lock */
+   SDL_mutexP(q->mutex);
 
    n = malloc(sizeof(Node_));
    n->data = data;
@@ -82,8 +83,9 @@ void tq_enqueue( ThreadQueue q, void *data )
       q->last->next = n;
    q->last = n;
 
+   /* Signal and unlock */
    SDL_SemPost(q->semaphore);
-   SDL_mutexV(q->mutex); // Unlock
+   SDL_mutexV(q->mutex);
 }
 
 void* tq_dequeue( ThreadQueue q )
@@ -91,10 +93,13 @@ void* tq_dequeue( ThreadQueue q )
    void *d;
    Node temp;
    
-   SDL_mutexP(q->mutex); // Lock
+   /* Lock */
+   SDL_mutexP(q->mutex);
 
    if (q->first == NULL) {
-      SDL_mutexV(q->mutex); // Unlock. We don't want a dead lock!
+      WARN("Tried to dequeue while the queue was empty. This is really SEVERE!");
+      /* Unlock to prevent a deadlock */
+      SDL_mutexV(q->mutex);
       return NULL;
    }
 
@@ -105,7 +110,8 @@ void* tq_dequeue( ThreadQueue q )
       q->last = NULL;
    free(temp);
    
-   SDL_mutexV(q->mutex); // Unlock
+   /* Unlock */
+   SDL_mutexV(q->mutex);
    return d;
 }
 
