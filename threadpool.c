@@ -17,7 +17,7 @@
 
 
 #if SDL_VERSION_ATLEAST(1,3,0)
-const int MAXTHREADS = SDL_GetCPUCount(); /* TODO: I have to read the doc about this... */
+const int MAXTHREADS = SDL_GetCPUCount()*4; /* TODO: I have to read the doc about this... */
 #else
 const int MAXTHREADS = 8;
 #endif
@@ -51,6 +51,14 @@ typedef struct ThreadData_ {
    ThreadQueue stopped;
 } ThreadData_;
 
+typedef struct vpoolThreadData_ {
+	SDL_cond *cond;
+   SDL_mutex *mutex;
+   int *count;
+   Node node;
+} vpoolThreadData_;
+typedef vpoolThreadData_ *vpoolThreadData;
+
 
 static ThreadQueue queue = NULL;
 
@@ -83,7 +91,8 @@ void tq_enqueue( ThreadQueue q, void *data )
       q->last->next = n;
    q->last = n;
 
-   /* Signal and unlock */
+   /* Signal and unlock.
+    * This wil break if someone tries to enqueue 2^32+1 elements */
    SDL_SemPost(q->semaphore);
    SDL_mutexV(q->mutex);
 }
@@ -136,8 +145,8 @@ int tq_isEmpty( ThreadQueue q )
 }
 
 
-
-/**/
+/* Enqueues a new job for the threadpool. Do NOT enqueue a job that has to wait
+ * for another job to be done as this could lead to a deadlock. */
 int threadpool_newJob(int (*function)(void *), void *data)
 {
    ThreadQueue_data node;
@@ -170,6 +179,9 @@ int threadpool_worker( void *data )
       
       tq_enqueue( work->idle, work );
    }
+   /* This might break stuff! If threadpool_handler is about to give this
+    * thread some work, then something will break! I don't know how to fix this
+    * as of now. */
    tq_enqueue( work->stopped, work );
 
    return 0;
@@ -227,6 +239,7 @@ int threadpool_handler( void *data )
          SDL_SemPost( threadarg->semaphore );
       }
    }
+	/* TODO: cleanup and maybe a way to stop the threadpool */
 }
 
 int threadpool_init()
@@ -241,6 +254,84 @@ int threadpool_init()
    SDL_CreateThread( threadpool_handler, NULL );
 
    return 0;
+}
+
+/* Creates a new vpool queue */
+ThreadQueue vpool_create()
+{
+   return tq_create();
+}
+
+/* Enqueue a job in the vpool queue. Do NOT enqueue a job that has to wait for
+ * another job to be done as this could lead to a deadlock. */
+void vpool_enqueue(ThreadQueue queue, int (*function)(void *), void *data)
+{
+   ThreadQueue_data node;
+   
+   node = malloc( sizeof(ThreadQueue_data_) );
+   node->data = data;
+   node->function = function;
+   
+   tq_enqueue( queue, node );
+}
+
+int vpool_worker(void *data)
+{
+   vpoolThreadData work;
+   
+   work = (vpoolThreadData) data;
+
+   /* Do work */
+   work->node->function( work->node->data );
+
+   /* Count down the counter and signal vpool_wait if all threads are done */
+   SDL_mutexP( work->mutex );
+   *count = *count - 1;
+   if (*count == 0)
+      SDL_CondSignal( work->cond );
+   SDL_mutexV( work->mutex );
+
+   /* Cleanup */
+   free(work->node);
+   free(work);
+
+   return 0;
+}
+
+/* Run every job in the vpool queue and block untill every job in the queue is
+ * done. It destroys the queue when it's done. */
+void vpool_wait(ThreadQueue queue)
+{
+   int i, count;
+   SDL_cond *cond;
+   SDL_mutex *mutex;
+   vpoolThreadData arg;
+   ThreadQueue_data node;
+
+   cond = SDL_CreateCond();
+   mutex = SDL_CreateMutex();
+   count = SDL_SemValue( queue->semaphore );
+
+   for (i=0; i<count; i++) {
+      SDL_SemWait( queue->semaphore );
+      node = tq_dequeue( queue );
+      arg = malloc( sizeof(vpoolThreadData_) );
+
+      arg->node = node;
+      arg->cond = cond;
+      arg->mutex = mutex;
+      arg->count = &count;
+
+      threadpool_newJob( vpool_worker, arg );
+   }
+
+   /* Wait for the threads to finish */
+   SDL_CondWait( cond );
+
+   /* Clean up */
+   SDL_DestroyMutex( mutex );
+   SDL_DestroyCond( cond );
+   tq_destroy( queue );
 }
 
 /* Notes
