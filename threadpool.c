@@ -10,7 +10,7 @@
 
 #include "SDL.h"
 #include "SDL_thread.h"
-#include "log.h" /* For debugging in naev */
+// #include "log.h" /* For debugging in naev */
 #include <stdlib.h>
 
 #define THREADPOOL_TIMEOUT (30 * 1000)
@@ -55,7 +55,7 @@ typedef struct vpoolThreadData_ {
 	SDL_cond *cond;
    SDL_mutex *mutex;
    int *count;
-   Node node;
+   ThreadQueue_data node;
 } vpoolThreadData_;
 typedef vpoolThreadData_ *vpoolThreadData;
 
@@ -106,7 +106,7 @@ void* tq_dequeue( ThreadQueue q )
    SDL_mutexP(q->mutex);
 
    if (q->first == NULL) {
-      WARN("Tried to dequeue while the queue was empty. This is really SEVERE!");
+      // WARN("Tried to dequeue while the queue was empty. This is really SEVERE!");
       /* Unlock to prevent a deadlock */
       SDL_mutexV(q->mutex);
       return NULL;
@@ -151,7 +151,7 @@ int threadpool_newJob(int (*function)(void *), void *data)
 {
    ThreadQueue_data node;
    if (queue == NULL) {
-      WARN("threadpool.c: Threadpool has not been initialized yet!");
+      // WARN("threadpool.c: Threadpool has not been initialized yet!");
       return -2;
    }
    
@@ -245,7 +245,7 @@ int threadpool_handler( void *data )
 int threadpool_init()
 {
    if (queue != NULL) {
-      WARN("Threadpool has already been initialized!");
+      // WARN("Threadpool has already been initialized!");
       return -1;
    }
 
@@ -286,8 +286,8 @@ int vpool_worker(void *data)
 
    /* Count down the counter and signal vpool_wait if all threads are done */
    SDL_mutexP( work->mutex );
-   *count = *count - 1;
-   if (*count == 0)
+   *(work->count) = *(work->count) - 1;
+   if (*(work->count) == 0)
       SDL_CondSignal( work->cond );
    SDL_mutexV( work->mutex );
 
@@ -312,6 +312,7 @@ void vpool_wait(ThreadQueue queue)
    mutex = SDL_CreateMutex();
    count = SDL_SemValue( queue->semaphore );
 
+   SDL_mutexP( mutex );
    for (i=0; i<count; i++) {
       SDL_SemWait( queue->semaphore );
       node = tq_dequeue( queue );
@@ -326,7 +327,8 @@ void vpool_wait(ThreadQueue queue)
    }
 
    /* Wait for the threads to finish */
-   SDL_CondWait( cond );
+   SDL_CondWait( cond, mutex );
+   SDL_mutexV( mutex );
 
    /* Clean up */
    SDL_DestroyMutex( mutex );
