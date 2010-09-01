@@ -238,6 +238,7 @@ int threadpool_handler( void *data )
          threadarg->data = node->data;
          SDL_SemPost( threadarg->semaphore );
       }
+      free(node);
    }
 	/* TODO: cleanup and maybe a way to stop the threadpool */
 }
