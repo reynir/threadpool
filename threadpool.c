@@ -1,23 +1,21 @@
 /*
- * threadpool.c
- *
- * Reynir Reynisson
- * 
- * The queue stuff is mostly stolen from queue.c
- * The queue is not intended for general use. Deadlocks might occur if used
- * in a 'wrong' way.
+ * See Licensing and Copyright notice in naev.h
  */
+
+#ifdef LOG_H
+#include "log.h" /* For debugging in naev */
+#endif
 
 #include "SDL.h"
 #include "SDL_thread.h"
-// #include "log.h" /* For debugging in naev */
+
 #include <stdlib.h>
 
 #define THREADPOOL_TIMEOUT (30 * 1000)
 
 
 #if SDL_VERSION_ATLEAST(1,3,0)
-const int MAXTHREADS = SDL_GetCPUCount()*4; /* TODO: I have to read the doc about this... */
+const int MAXTHREADS = SDL_GetCPUCount();
 #else
 const int MAXTHREADS = 8;
 #endif
@@ -92,7 +90,8 @@ void tq_enqueue( ThreadQueue q, void *data )
    q->last = n;
 
    /* Signal and unlock.
-    * This wil break if someone tries to enqueue 2^32+1 elements */
+    * This wil break if someone tries to enqueue 2^32+1 elements or something.
+    * */
    SDL_SemPost(q->semaphore);
    SDL_mutexV(q->mutex);
 }
@@ -106,7 +105,9 @@ void* tq_dequeue( ThreadQueue q )
    SDL_mutexP(q->mutex);
 
    if (q->first == NULL) {
-      // WARN("Tried to dequeue while the queue was empty. This is really SEVERE!");
+      #ifdef LOG_H
+      WARN("Tried to dequeue while the queue was empty. This is really SEVERE!");
+      #endif
       /* Unlock to prevent a deadlock */
       SDL_mutexV(q->mutex);
       return NULL;
@@ -129,6 +130,7 @@ void tq_destroy( ThreadQueue q )
    SDL_DestroySemaphore(q->semaphore);
    SDL_DestroyMutex(q->mutex);
 
+   /* Shouldn't it free the dequeued nodes? */
    while(q->first != NULL) {
       tq_dequeue(q);
    }
@@ -151,7 +153,9 @@ int threadpool_newJob(int (*function)(void *), void *data)
 {
    ThreadQueue_data node;
    if (queue == NULL) {
-      // WARN("threadpool.c: Threadpool has not been initialized yet!");
+      #ifdef LOG_H
+      WARN("threadpool.c: Threadpool has not been initialized yet!");
+      #endif
       return -2;
    }
    
@@ -172,16 +176,22 @@ int threadpool_worker( void *data )
 
    while (1) {
       /* Break if timeout or signal to stop */
-      if (SDL_SemWaitTimeout( work->semaphore, THREADPOOL_TIMEOUT ) != 0)
+      if (SDL_SemWaitTimeout( work->semaphore, THREADPOOL_TIMEOUT ) != 0) {
          break;
+      }
 
       (*work->function)( work->data );
       
       tq_enqueue( work->idle, work );
    }
-   /* This might break stuff! If threadpool_handler is about to give this
-    * thread some work, then something will break! I don't know how to fix this
-    * as of now. */
+   /* TODO: The folowing might break stuff! The thread is still in the idle
+    * queue so  the threadpool_handler might have given the thread work while
+    * the  threadpool_worker was about to break the while loop. A fix would be
+    * to  use a different data structure that allows the threadpool_worker to
+    * remove itself from the idle queue. This means I should write a different
+    * tq_enqueue function that returns the Node that the threadpool_worker is
+    * in. There should also be a tq_trytoremovemefromthisqueue-function that
+    * takes a Node and tries to remove the Node from the queue. */
    tq_enqueue( work->stopped, work );
 
    return 0;
@@ -191,7 +201,8 @@ int threadpool_handler( void *data )
 {
    int i;
    ThreadData_ *threadargs, *threadarg;
-   ThreadQueue idle, stopped; /* Queues for idle workers and stopped workers */
+   /* Queues for idle workers and stopped workers */
+   ThreadQueue idle, stopped;
    ThreadQueue_data node;
 
    threadargs = malloc( sizeof(ThreadData_)*MAXTHREADS );
@@ -240,13 +251,15 @@ int threadpool_handler( void *data )
       }
       free(node);
    }
-	/* TODO: cleanup and maybe a way to stop the threadpool */
+   /* TODO: cleanup and maybe a way to stop the threadpool */
 }
 
 int threadpool_init()
 {
    if (queue != NULL) {
-      // WARN("Threadpool has already been initialized!");
+      #ifdef LOG_H
+      WARN("Threadpool has already been initialized!");
+      #endif
       return -1;
    }
 
