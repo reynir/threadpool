@@ -36,3 +36,7 @@ void vpool_wait( ThreadQueue queue );
 
 
 #endif
+
+#ifndef LOG_H
+#define WARN(str, args...) (fprintf(stderr,"Warning: [%s] "str"\n", __func__, ## args))
+#endif

@@ -1,6 +1,10 @@
 /*
  * See Licensing and Copyright notice in naev.h
  */
+/*
+ * The queue is inspired by this paper (look for the queue with two locks):
+ * http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.109.5602&rep=rep1&type=pdf
+ */
 
 #ifdef LOG_H
 #include "log.h" /* For debugging in naev */
@@ -11,7 +15,9 @@
 
 #include <stdlib.h>
 
-#define THREADPOOL_TIMEOUT (30 * 1000)
+#define THREADPOOL_TIMEOUT (5 * 100)
+#define THREADSIG_STOP (1)
+#define THREADSIG_RUN (0)
 
 
 #if SDL_VERSION_ATLEAST(1,3,0)
@@ -31,7 +37,8 @@ typedef struct ThreadQueue_ {
    Node first;
    Node last;
    SDL_sem *semaphore; 
-   SDL_mutex *mutex;
+   SDL_mutex *t_lock;
+   SDL_mutex *h_lock;
 } ThreadQueue_;
 typedef ThreadQueue_ *ThreadQueue;
 
@@ -44,13 +51,14 @@ typedef ThreadQueue_data_ *ThreadQueue_data;
 typedef struct ThreadData_ {
    int (*function)(void *);
    void *data;
+   int signal;
    SDL_sem *semaphore;
    ThreadQueue idle;
    ThreadQueue stopped;
 } ThreadData_;
 
 typedef struct vpoolThreadData_ {
-	SDL_cond *cond;
+   SDL_cond *cond;
    SDL_mutex *mutex;
    int *count;
    ThreadQueue_data node;
@@ -62,11 +70,19 @@ static ThreadQueue queue = NULL;
 
 ThreadQueue tq_create()
 {
-   ThreadQueue q = malloc( sizeof(ThreadQueue_) );
+   Node n;
+   ThreadQueue q;
 
-   q->first = NULL;
-   q->last = NULL;
-   q->mutex = SDL_CreateMutex();
+   q = malloc( sizeof(ThreadQueue_) );
+
+   /* Allocate and insert the dummy node */
+   n = malloc( sizeof(Node_) );
+   n->next = NULL;
+   q->first = n;
+   q->last = n;
+
+   q->t_lock = SDL_CreateMutex();
+   q->h_lock = SDL_CreateMutex();
    q->semaphore = SDL_CreateSemaphore( 0 );
 
    return q;
@@ -77,70 +93,79 @@ void tq_enqueue( ThreadQueue q, void *data )
 {
    Node n;
 
-   /* Lock */
-   SDL_mutexP(q->mutex);
-
    n = malloc(sizeof(Node_));
    n->data = data;
    n->next = NULL;
-   if (q->first == NULL)
-      q->first = n;
-   else
-      q->last->next = n;
+
+   /* Lock */
+   SDL_mutexP(q->t_lock);
+
+   q->last->next = n;
    q->last = n;
 
    /* Signal and unlock.
     * This wil break if someone tries to enqueue 2^32+1 elements or something.
     * */
    SDL_SemPost(q->semaphore);
-   SDL_mutexV(q->mutex);
+   SDL_mutexV(q->t_lock);
 }
 
+int tq_enqueue_special( ThreadQueue q, void *data, Node *n )
+{
+   /* TODO */
+
+   return 0;
+}
+
+/* IMPORTANT! The callee should ALWAYS have called SDL_SemWait() on the semaphore. */
 void* tq_dequeue( ThreadQueue q )
 {
    void *d;
-   Node temp;
+   Node newhead, node;
    
    /* Lock */
-   SDL_mutexP(q->mutex);
+   SDL_mutexP(q->h_lock);
 
-   if (q->first == NULL) {
+   node = q->first;
+   newhead = node->next;
+
+   if (newhead == NULL) {
       #ifdef LOG_H
-      WARN("Tried to dequeue while the queue was empty. This is really SEVERE!");
+      WARN("Tried to dequeue while the queue was empty!");
       #endif
-      /* Unlock to prevent a deadlock */
-      SDL_mutexV(q->mutex);
+      /* Unlock and return NULL */
+      SDL_mutexV(q->h_lock);
       return NULL;
    }
-
-   d = q->first->data;
-   temp = q->first;
-   q->first = q->first->next;
-   if (q->first == NULL)
-      q->last = NULL;
-   free(temp);
+   /* Remember the value and assign newhead as the new dummy element. */
+   d = newhead->data;
+   q->first = newhead;
    
-   /* Unlock */
-   SDL_mutexV(q->mutex);
+   SDL_mutexV(q->h_lock);
+   free(node);
    return d;
 }
 
+/* This does not try to lock or anything */
 void tq_destroy( ThreadQueue q )
 {
    SDL_DestroySemaphore(q->semaphore);
-   SDL_DestroyMutex(q->mutex);
+   SDL_DestroyMutex(q->h_lock);
+   SDL_DestroyMutex(q->t_lock);
 
    /* Shouldn't it free the dequeued nodes? */
-   while(q->first != NULL) {
-      tq_dequeue(q);
+   while(q->first->next != NULL) {
+      free( tq_dequeue(q) );
    }
+   
+   free( q->first );
    free(q);
 }
 
 /* Eh, threadsafe? nah */
 int tq_isEmpty( ThreadQueue q )
 {
-   if (q->first == NULL)
+   if (q->first->next == NULL)
       return 1;
    else
       return 0;
@@ -175,11 +200,13 @@ int threadpool_worker( void *data )
    work = (ThreadData_ *) data;
 
    while (1) {
-      /* Break if timeout or signal to stop */
-      if (SDL_SemWaitTimeout( work->semaphore, THREADPOOL_TIMEOUT ) != 0) {
+      /* Break if signal to stop */
+      SDL_SemWait( work->semaphore );
+      if ( work->signal == THREADSIG_STOP ) {
          break;
       }
 
+      /* Do work :-) */
       (*work->function)( work->data );
       
       tq_enqueue( work->idle, work );
@@ -199,7 +226,7 @@ int threadpool_worker( void *data )
 
 int threadpool_handler( void *data )
 {
-   int i;
+   int i, nrunning;
    ThreadData_ *threadargs, *threadarg;
    /* Queues for idle workers and stopped workers */
    ThreadQueue idle, stopped;
@@ -217,12 +244,29 @@ int threadpool_handler( void *data )
       threadargs[i].semaphore = SDL_CreateSemaphore( 0 );
       threadargs[i].idle = idle;
       threadargs[i].stopped = stopped;
+      threadargs[i].signal = THREADSIG_RUN;
 
       tq_enqueue(stopped, &threadargs[i]);
    }
 
+   nrunning = 0;
+
    while (1) {
-      SDL_SemWait( queue->semaphore ); /* Wait for new job(s) in queue */
+
+      if (nrunning > 0) {
+         if (SDL_SemWaitTimeout( queue->semaphore, THREADPOOL_TIMEOUT ) != 0) {
+            /* Start killing threads ;) */
+            if ( SDL_SemTryWait(idle->semaphore) == 0 ) {
+               threadarg = tq_dequeue( idle );
+               threadarg->signal = THREADSIG_STOP;
+               SDL_SemPost( threadarg->semaphore );
+            }
+            continue;
+         }
+      } else {
+         /* Wait for a new job */
+         SDL_SemWait( queue->semaphore );
+      }
       node = tq_dequeue( queue );
 
       if( SDL_SemTryWait(idle->semaphore) == 0) {
@@ -237,6 +281,7 @@ int threadpool_handler( void *data )
          threadarg = tq_dequeue(stopped);
          threadarg->function = node ->function;
          threadarg->data = node->data;
+         threadarg->signal = THREADSIG_RUN;
          SDL_SemPost( threadarg->semaphore );
 
          SDL_CreateThread( threadpool_worker, threadarg );
@@ -298,7 +343,7 @@ int vpool_worker(void *data)
    /* Do work */
    work->node->function( work->node->data );
 
-   /* Count down the counter and signal vpool_wait if all threads are done */
+   /* Decrement the counter and signal vpool_wait if all threads are done */
    SDL_mutexP( work->mutex );
    *(work->count) = *(work->count) - 1;
    if (*(work->count) == 0)
@@ -330,6 +375,8 @@ void vpool_wait(ThreadQueue queue)
    for (i=0; i<count; i++) {
       SDL_SemWait( queue->semaphore );
       node = tq_dequeue( queue );
+      /* This should be put outside the for loop and vpool_wait should be
+       * responsible for freeing. */
       arg = malloc( sizeof(vpoolThreadData_) );
 
       arg->node = node;
