@@ -110,13 +110,6 @@ void tq_enqueue( ThreadQueue q, void *data )
    SDL_mutexV(q->t_lock);
 }
 
-int tq_enqueue_special( ThreadQueue q, void *data, Node *n )
-{
-   /* TODO */
-
-   return 0;
-}
-
 /* IMPORTANT! The callee should ALWAYS have called SDL_SemWait() on the semaphore. */
 void* tq_dequeue( ThreadQueue q )
 {
@@ -211,14 +204,6 @@ int threadpool_worker( void *data )
       
       tq_enqueue( work->idle, work );
    }
-   /* TODO: The folowing might break stuff! The thread is still in the idle
-    * queue so  the threadpool_handler might have given the thread work while
-    * the  threadpool_worker was about to break the while loop. A fix would be
-    * to  use a different data structure that allows the threadpool_worker to
-    * remove itself from the idle queue. This means I should write a different
-    * tq_enqueue function that returns the Node that the threadpool_worker is
-    * in. There should also be a tq_trytoremovemefromthisqueue-function that
-    * takes a Node and tries to remove the Node from the queue. */
    tq_enqueue( work->stopped, work );
 
    return 0;
@@ -351,8 +336,8 @@ int vpool_worker(void *data)
    SDL_mutexV( work->mutex );
 
    /* Cleanup */
-   free(work->node);
-   free(work);
+   //free(work->node);
+   //free(work);
 
    return 0;
 }
@@ -361,7 +346,7 @@ int vpool_worker(void *data)
  * done. It destroys the queue when it's done. */
 void vpool_wait(ThreadQueue queue)
 {
-   int i, count;
+   int i, cnt;
    SDL_cond *cond;
    SDL_mutex *mutex;
    vpoolThreadData arg;
@@ -369,22 +354,20 @@ void vpool_wait(ThreadQueue queue)
 
    cond = SDL_CreateCond();
    mutex = SDL_CreateMutex();
-   count = SDL_SemValue( queue->semaphore );
+   cnt = SDL_SemValue( queue->semaphore );
 
    SDL_mutexP( mutex );
-   for (i=0; i<count; i++) {
+   arg = malloc( sizeof(vpoolThreadData_) * cnt );
+   for (i=0; i<cnt; i++) {
       SDL_SemWait( queue->semaphore );
       node = tq_dequeue( queue );
-      /* This should be put outside the for loop and vpool_wait should be
-       * responsible for freeing. */
-      arg = malloc( sizeof(vpoolThreadData_) );
 
-      arg->node = node;
-      arg->cond = cond;
-      arg->mutex = mutex;
-      arg->count = &count;
+      arg[i].node = node;
+      arg[i].cond = cond;
+      arg[i].mutex = mutex;
+      arg[i].count = &cnt;
 
-      threadpool_newJob( vpool_worker, arg );
+      threadpool_newJob( vpool_worker, arg+i );
    }
 
    /* Wait for the threads to finish */
@@ -395,6 +378,7 @@ void vpool_wait(ThreadQueue queue)
    SDL_DestroyMutex( mutex );
    SDL_DestroyCond( cond );
    tq_destroy( queue );
+   free(arg);
 }
 
 /* Notes
