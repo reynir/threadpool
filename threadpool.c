@@ -1,5 +1,5 @@
 /*
- * See Licensing and Copyright notice in naev.h
+ * See Licensing and Copyright notice in threadpool.h
  */
 /*
  * The queue is inspired by this paper (look for the queue with two locks):
