@@ -1,3 +1,5 @@
 A threadpool intended for use in naev
 
-Please comment!
+The threadpool has been merged into naev (or at least a branch of naev).
+This is not being maintained for now. Please see the threadpool branch
+of naev to see the newest version of the threadpool.
